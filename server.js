@@ -49,7 +49,7 @@ app.post('/identify', async (req, res) => {
 
     const apiKey = nextKey();
     const response = await fetch(
-      `${GEMINI_BASE}/v1beta/models/gemini-pro-vision:generateContent?key=${apiKey}`,
+      `${GEMINI_BASE}/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
