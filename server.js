@@ -1,113 +1,137 @@
-// server.js - Minimal Gemini proxy for /identify
+// server.js - Hardened Gemini Proxy for SisuNic on Render
 import express from 'express';
 import cors from 'cors';
-import { Buffer } from 'buffer';
 
+// --- Configuration ---
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' })); // حجم تصویر تا 50MB
-
 const PORT = process.env.PORT || 3000;
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
-// کلیدهای Gemini از Environment
-const API_KEYS = [
-  process.env.GEMINI_API_KEY_1,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3,
-  process.env.GEMINI_API_KEY_4,
-  process.env.GEMINI_API_KEY_5,
-].filter(Boolean);
+// --- Middleware ---
+// Enable CORS for all routes to allow frontend access
+app.use(cors());
+// Increase JSON payload limit for large base64 images
+app.use(express.json({ limit: '10mb' }));
+
+// --- API Key Management ---
+// Load all available Gemini API keys from environment variables.
+// Render.com uses the "Environment" tab to set these.
+const API_KEYS = Object.keys(process.env)
+  .filter(key => key.startsWith('GEMINI_API_KEY_'))
+  .map(key => process.env[key])
+  .filter(Boolean); // Filter out any undefined/empty keys
 
 if (API_KEYS.length === 0) {
-  console.error('❌ No GEMINI_API_KEY_x found in environment.');
-  process.exit(1);
+  console.error('FATAL ERROR: No GEMINI_API_KEY_x variables found in the environment.');
+  console.error('Please set at least one GEMINI_API_KEY_1 in your deployment environment.');
+  process.exit(1); // Exit if no keys are configured
 }
 
-console.log(`🚀 Starting /identify server with ${API_KEYS.length} key(s)`);
+console.log(`✅ SisuNic Proxy Server starting...`);
+console.log(`🔑 Found ${API_KEYS.length} Gemini API key(s).`);
 
-let rrIndex = 0;
-function nextKey() {
-  const k = API_KEYS[rrIndex];
-  rrIndex = (rrIndex + 1) % API_KEYS.length;
-  return k;
+// Simple round-robin to distribute requests across keys
+let keyIndex = 0;
+function getNextApiKey() {
+  const key = API_KEYS[keyIndex];
+  keyIndex = (keyIndex + 1) % API_KEYS.length;
+  return key;
 }
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+// --- Routes ---
 
-// Health check
+// Health check endpoint to verify the server is running
 app.get('/health', (req, res) => {
-  res.json({ ok: true, keys: API_KEYS.length, ts: Date.now() });
+  res.status(200).json({
+    status: 'ok',
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString(),
+    activeKeys: API_KEYS.length,
+  });
 });
 
-// Route اصلی اصلاح شده در server.js
+// Main endpoint for component identification
 app.post('/identify', async (req, res) => {
+  console.log('Received request for /identify');
   try {
-    // 1. دریافت پرامپت و تصویر از کلاینت
     const { imageBase64, prompt } = req.body;
+
     if (!imageBase64 || !prompt) {
-      return res.status(400).json({ error: 'No image or prompt provided' });
+      console.warn('⚠️ Bad Request: Missing imageBase64 or prompt.');
+      return res.status(400).json({ error: 'Request body must contain "imageBase64" and "prompt".' });
     }
 
-    const apiKey = nextKey();
+    const apiKey = getNextApiKey();
+    const geminiUrl = `${GEMINI_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
-    // 2. ساختار صحیح درخواست برای Gemini API
-    const geminiRequestBody = {
+    // This is the specific JSON structure required by the Gemini REST API
+    const requestPayload = {
       contents: [{
         parts: [
           { text: prompt },
-          {
-            inlineData: { // نام صحیح: inlineData
-              mimeType: 'image/jpeg', // نام صحیح: mimeType
-              data: imageBase64
-            }
-          }
+          { inlineData: { mimeType: 'image/jpeg', data: imageBase64 } }
         ]
       }],
-      // 3. درخواست خروجی JSON (بسیار مهم)
       generationConfig: {
         responseMimeType: "application/json",
       }
     };
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    console.log(`Sending request to Gemini API with key ending in ...${apiKey.slice(-4)}`);
 
     const geminiResponse = await fetch(geminiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiRequestBody),
+      body: JSON.stringify(requestPayload),
     });
-    
-    // مدیریت بهتر خطاها
+
+    // Handle non-successful responses from the Gemini API
     if (!geminiResponse.ok) {
-        const errorBody = await geminiResponse.text();
-        console.error(`Gemini API Error (${geminiResponse.status}):`, errorBody);
-        // ارسال خطای اصلی از سمت Gemini به کلاینت
-        return res.status(geminiResponse.status).send(errorBody);
+      const errorText = await geminiResponse.text();
+      console.error(`❌ Gemini API Error (Status: ${geminiResponse.status}): ${errorText}`);
+      // Forward the error from Gemini to the client for better debugging
+      return res.status(geminiResponse.status).json({
+        error: `Gemini API request failed with status ${geminiResponse.status}`,
+        details: errorText,
+      });
     }
 
     const data = await geminiResponse.json();
 
-    // استخراج متن JSON از پاسخ و ارسال آن
-    // Gemini پاسخ را به صورت یک رشته JSON داخل یک ساختار دیگر برمیگرداند
-    if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        const jsonText = data.candidates[0].content.parts[0].text;
-        try {
-            // برای اطمینان از اینکه متن واقعاً JSON است، آن را parse می‌کنیم
-            const parsedJson = JSON.parse(jsonText);
-            // ارسال مستقیم آبجکت JSON نهایی به کلاینت
-            res.json(parsedJson);
-        } catch (e) {
-            console.error("Gemini returned non-JSON text:", jsonText);
-            res.status(500).json({ error: 'AI returned invalid JSON format' });
-        }
+    // The Gemini API wraps the JSON output within a text field in the response.
+    // We need to extract and parse it.
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (jsonText) {
+      try {
+        const parsedJson = JSON.parse(jsonText);
+        console.log('✅ Successfully identified component. Sending JSON response to client.');
+        res.status(200).json(parsedJson);
+      } catch (e) {
+        console.error('❌ Gemini returned a string that is not valid JSON:', jsonText);
+        res.status(500).json({ error: 'AI returned an invalid JSON format.' });
+      }
     } else {
-        // اگر پاسخ به دلیل ایمنی بلاک شده باشد
-        console.error("Gemini response was blocked or had an unexpected structure:", data);
-        res.status(400).json(data); // ارسال کل پاسخ خطا به کلاینت برای دیباگ
+      // This can happen if the response was blocked for safety reasons or had an unexpected structure.
+      console.warn('⚠️ Gemini response was blocked or did not contain expected text part.', JSON.stringify(data, null, 2));
+      res.status(400).json({
+        error: 'AI response was empty or blocked.',
+        details: data,
+      });
     }
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error', message: String(err) });
+  } catch (error) {
+    console.error('💥 An unexpected server error occurred:', error);
+    res.status(500).json({
+      error: 'An internal server error occurred.',
+      message: error instanceof Error ? error.message : String(error)
+    });
   }
+});
+
+// --- Server Startup ---
+app.listen(PORT, () => {
+  console.log(`🚀 Server is listening on port ${PORT}`);
+  console.log(`🔗 Health check available at http://localhost:${PORT}/health`);
 });
