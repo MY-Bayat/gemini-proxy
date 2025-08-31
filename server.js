@@ -65,6 +65,78 @@ app.post('/identify', async (req, res) => {
     const apiKey = getNextApiKey();
     const geminiUrl = `${GEMINI_BASE_URL}/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
+    const responseSchema = {
+        type: 'OBJECT',
+        properties: {
+          quality: {
+            type: 'STRING',
+            enum: ['good', 'poor']
+          },
+          qualityReason: {
+            type: 'STRING',
+            description: 'Reason for poor quality, if applicable. Must be in the requested language.'
+          },
+          identifications: {
+            type: 'ARRAY',
+            description: 'List of identified components. If no component is confidently identified in the center, return an empty array.',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                componentType: {
+                  type: 'STRING',
+                  description: 'A specific type from a predefined list (e.g., ic-generic, resistor-smd).'
+                },
+                confidence: {
+                  type: 'NUMBER',
+                  description: 'Confidence score from 0.0 to 1.0.'
+                },
+                data: {
+                  type: 'OBJECT',
+                  properties: {
+                    name: {
+                      type: 'STRING',
+                      description: 'The primary name or part number (e.g., "LM7805", "ATmega328P").'
+                    },
+                    code: {
+                      type: 'STRING',
+                      description: 'Any code read from the component if different from name (e.g., "103" for a resistor).'
+                    },
+                    description: {
+                      type: 'STRING',
+                      description: 'A detailed, professional description in the requested language.'
+                    },
+                    applications: {
+                      type: 'ARRAY',
+                      description: 'List of common applications for this component, in the requested language.',
+                      items: { type: 'STRING' }
+                    },
+                    models: {
+                      type: 'ARRAY',
+                      description: 'List of common models or package types (e.g., "TO-220", "DIP-8").',
+                      items: { type: 'STRING' }
+                    },
+                    boundingBox: {
+                      type: 'OBJECT',
+                      description: 'MANDATORY. The normalized coordinates of the component in the image.',
+                      properties: {
+                        x_min: { type: 'NUMBER' },
+                        y_min: { type: 'NUMBER' },
+                        x_max: { type: 'NUMBER' },
+                        y_max: { type: 'NUMBER' }
+                      },
+                      required: ['x_min', 'y_min', 'x_max', 'y_max']
+                    }
+                  },
+                  required: ['name', 'description']
+                }
+              },
+              required: ['componentType', 'confidence', 'data']
+            }
+          }
+        },
+        required: ['quality', 'identifications']
+    };
+
     // This is the specific JSON structure required by the Gemini REST API
     const requestPayload = {
       contents: [{
@@ -75,6 +147,7 @@ app.post('/identify', async (req, res) => {
       }],
       generationConfig: {
         responseMimeType: "application/json",
+        responseSchema: responseSchema
       }
     };
 
